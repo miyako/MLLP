@@ -1,0 +1,35 @@
+name: Fuzz
+
+on:
+  schedule:
+    # Run nightly at 02:00 UTC.
+    - cron: '0 2 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  fuzz:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.25.x'
+          cache: false
+
+      - name: Fuzz MLLP decoder
+        run: |
+          go test ./internal/framing/ \
+            -run='^$' \
+            -fuzz=FuzzDecoder \
+            -fuzztime=120s
+
+      - name: Fuzz encode/decode round-trip
+        run: |
+          go test ./internal/framing/ \
+            -run='^$' \
+            -fuzz=FuzzEncodeDecode \
+            -fuzztime=120s
