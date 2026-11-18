@@ -211,8 +211,22 @@ func TestListenVerticalSlice(t *testing.T) {
 		"id": msgID, "ackCode": "AA",
 	})
 
-	// Step 7: CLI should transmit the HL7 ACK to the MLLP client.
-	// Also drain any "sent" event from stdout.
+	// Step 7: The external MLLP client should receive the HL7 ACK.
+	ackPayload := recvMLLP(t, mllpConn, timeout)
+	if len(ackPayload) == 0 {
+		t.Fatal("no ACK received by external MLLP client")
+	}
+	t.Logf("external client received ACK (%d bytes)", len(ackPayload))
+
+	// Step 8: Verify MSA-2 echoes the original MSH-10.
+	if !strings.Contains(string(ackPayload), "MSG00001") {
+		t.Errorf("ACK missing original control ID MSG00001:\n%s", ackPayload)
+	}
+	if !strings.Contains(string(ackPayload), "MSA|AA|MSG00001") {
+		t.Errorf("ACK missing MSA|AA|MSG00001:\n%s", ackPayload)
+	}
+
+	// Also drain the "sent" event from stdout.
 	for i := 0; i < 3; i++ {
 		ev := ndjsonLine(t, out, timeout)
 		if ev["kind"] == "sent" {

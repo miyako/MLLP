@@ -208,8 +208,8 @@ func runListen(args []string, stdin io.Reader, stdout, stderr io.Writer, log *lo
 
 	log.Info("listener started", map[string]any{"address": addr})
 
-	// pending maps CLI message ID → connection ID, waiting for host ACK.
-	pending := map[string]string{}
+	// pending maps CLI message ID → pendingMsg, waiting for host ACK.
+	pending := map[string]*pendingMsg{}
 
 	failures := make(chan error, 4)
 
@@ -381,9 +381,25 @@ func runProbe(args []string, stdout io.Writer, log *logging.Logger) error {
 
 // --- frame and command handlers ---
 
-func handleFrame(frame transport.Frame, pending map[string]string, sends chan<- transport.SendRequest, out *protocol.SafeWriter, log *logging.Logger) error {
+// pendingMsg tracks an inbound message waiting for a host ACK decision.
+type pendingMsg struct {
+	connectionID string
+	original     *er7.Message // needed to build the HL7 ACK bytes
+}
+
+// handleFrame converts a raw MLLP frame to a canonical JSON message and
+// forwards it to the host. It stores the original parsed message in pending
+// so that handleHostACK can later build the correct HL7 ACK bytes.
+func handleFrame(frame transport.Frame, pending map[string]*pendingMsg, sends chan<- transport.SendRequest, out *protocol.SafeWriter, log *logging.Logger) error {
 	msgID := "msg-" + nonce()
-	pending[msgID] = frame.ConnectionID
+
+	parsed, err := er7.Parse(frame.Payload)
+	if err != nil {
+		log.Warn("hl7 parse failed", map[string]any{"connectionId": frame.ConnectionID, "error": err.Error()})
+		return sendParseErrorACK(frame, sends, log)
+	}
+
+	pending[msgID] = &pendingMsg{connectionID: frame.ConnectionID, original: parsed}
 
 	msg, err := canonical.Encode(frame.Payload, canonical.Options{
 		ID:           msgID,
@@ -392,9 +408,8 @@ func handleFrame(frame transport.Frame, pending map[string]string, sends chan<- 
 		Peer:         frame.Peer,
 	})
 	if err != nil {
-		// Parsing failed: send AE, do not forward to host.
-		log.Warn("hl7 parse failed", map[string]any{"connectionId": frame.ConnectionID, "error": err.Error()})
 		delete(pending, msgID)
+		log.Warn("canonical encode failed", map[string]any{"connectionId": frame.ConnectionID, "error": err.Error()})
 		return sendParseErrorACK(frame, sends, log)
 	}
 
@@ -410,7 +425,7 @@ func sendParseErrorACK(frame transport.Frame, sends chan<- transport.SendRequest
 	return nil
 }
 
-func handleHostCommand(cmd *protocol.HostCommand, pending map[string]string, sends chan<- transport.SendRequest, out *protocol.SafeWriter, log *logging.Logger, cancel context.CancelFunc) error {
+func handleHostCommand(cmd *protocol.HostCommand, pending map[string]*pendingMsg, sends chan<- transport.SendRequest, out *protocol.SafeWriter, log *logging.Logger, cancel context.CancelFunc) error {
 	switch cmd.Kind {
 	case protocol.KindHello:
 		// Hello accepted by the reader; nothing else to do.
@@ -418,7 +433,6 @@ func handleHostCommand(cmd *protocol.HostCommand, pending map[string]string, sen
 
 	case protocol.KindAckHost:
 		return handleHostACK(cmd, pending, sends, out, log)
-
 	case protocol.KindShutdown:
 		cancel() // trigger graceful shutdown via context
 		return nil
@@ -434,14 +448,13 @@ func handleHostCommand(cmd *protocol.HostCommand, pending map[string]string, sen
 	return nil
 }
 
-func handleHostACK(cmd *protocol.HostCommand, pending map[string]string, sends chan<- transport.SendRequest, out *protocol.SafeWriter, log *logging.Logger) error {
-	// Decode the full ACK message from the raw JSON.
+func handleHostACK(cmd *protocol.HostCommand, pending map[string]*pendingMsg, sends chan<- transport.SendRequest, out *protocol.SafeWriter, log *logging.Logger) error {
 	var ackMsg protocol.AckHostMsg
 	if err := decodeRaw(cmd.Raw, &ackMsg); err != nil {
 		return fmt.Errorf("protocol: malformed ack message: %w", err)
 	}
 	msgID := ackMsg.ID
-	connID, ok := pending[msgID]
+	pm, ok := pending[msgID]
 	if !ok {
 		log.Warn("host ACK for unknown message", map[string]any{"id": msgID})
 		return nil
@@ -455,16 +468,44 @@ func handleHostACK(cmd *protocol.HostCommand, pending map[string]string, sends c
 		return fmt.Errorf("protocol: invalid ackCode %q", ackMsg.AckCode)
 	}
 
-	// We need the original HL7 message to build the ACK.
-	// In the current architecture the original payload is not stored here — it
-	// was forwarded to the host. For now, emit a status event acknowledging the
-	// host decision. Full ACK byte construction requires storing the original
-	// payload in a pending map, which is done in the next iteration.
-	log.Info("host ack received", map[string]any{"id": msgID, "code": string(code), "connectionId": connID})
-
-	return out.Write(map[string]any{
-		"protocol": 1, "kind": "sent", "id": msgID, "connectionId": connID,
+	// Build the HL7 ACK bytes from the original message.
+	ackPayload, err := ack.Build(pm.original, ack.Options{
+		Code:      code,
+		ErrorCode: ackMsg.ErrorCode,
+		ErrorText: ackMsg.ErrorText,
 	})
+	if err != nil {
+		log.Error("ack build failed", map[string]any{"id": msgID, "error": err.Error()})
+		return err
+	}
+
+	// Send the ACK back to the remote peer on the same connection.
+	result := make(chan error, 1)
+	sends <- transport.SendRequest{
+		ConnectionID: pm.connectionID,
+		Payload:      []byte(ackPayload),
+		Result:       result,
+	}
+
+	go func() {
+		err := <-result
+		if err != nil {
+			log.Error("ack send failed", map[string]any{"id": msgID, "connectionId": pm.connectionID, "error": err.Error()})
+			_ = out.Write(map[string]any{
+				"protocol": 1, "kind": "error", "code": "ack_send_failed",
+				"message": err.Error(), "connectionId": pm.connectionID,
+			})
+			return
+		}
+		log.Info("ack sent to peer", map[string]any{
+			"id": msgID, "code": string(code), "connectionId": pm.connectionID,
+			"controlId": pm.original.ControlID,
+		})
+		_ = out.Write(map[string]any{
+			"protocol": 1, "kind": "sent", "id": msgID, "connectionId": pm.connectionID,
+		})
+	}()
+	return nil
 }
 
 func handleHostCommandConnector(cmd *protocol.HostCommand, sends chan<- transport.SendRequest, out *protocol.SafeWriter, log *logging.Logger, cancel context.CancelFunc) error {
