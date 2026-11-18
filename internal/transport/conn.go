@@ -3,6 +3,7 @@ package transport
 import (
 	"context"
 	"crypto/rand"
+	"crypto/tls"
 	"encoding/hex"
 	"fmt"
 	"net"
@@ -14,12 +15,13 @@ import (
 
 // conn is a single TCP/TLS connection with MLLP framing.
 type conn struct {
-	id      string
-	peer    string
-	nc      net.Conn
-	maxFrame int
+	id         string
+	peer       string
+	nc         net.Conn
+	tls        bool
+	maxFrame   int
 	ackTimeout time.Duration
-	mu      sync.Mutex // guards writes
+	mu         sync.Mutex // guards writes
 }
 
 func newConn(nc net.Conn, maxFrame int, ackTimeout time.Duration) *conn {
@@ -34,10 +36,12 @@ func newConn(nc net.Conn, maxFrame int, ackTimeout time.Duration) *conn {
 		_ = tc.SetKeepAlive(true)
 		_ = tc.SetKeepAlivePeriod(DefaultKeepalive)
 	}
+	_, isTLS := nc.(*tls.Conn)
 	return &conn{
 		id:         connID(),
 		peer:       nc.RemoteAddr().String(),
 		nc:         nc,
+		tls:        isTLS,
 		maxFrame:   maxFrame,
 		ackTimeout: ackTimeout,
 	}
@@ -67,7 +71,7 @@ func (c *conn) readLoop(ctx context.Context, frames chan<- Frame) error {
 		cp := make([]byte, len(payload))
 		copy(cp, payload)
 		select {
-		case frames <- Frame{ConnectionID: c.id, Peer: c.peer, Payload: cp}:
+		case frames <- Frame{ConnectionID: c.id, Peer: c.peer, Payload: cp, TLS: c.tls}:
 		case <-ctx.Done():
 			return ctx.Err()
 		}

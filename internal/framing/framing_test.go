@@ -202,13 +202,21 @@ func TestOversizedFrame(t *testing.T) {
 	}
 }
 
-// --- encode rejects FS in payload ---
+// --- encode rejects FS and VT in payload ---
 
 func TestEncodeRejectsFS(t *testing.T) {
 	payload := []byte{'A', FS, 'B'}
 	var b bytes.Buffer
 	if err := Encode(&b, payload); err == nil {
 		t.Fatal("Encode accepted payload containing FS")
+	}
+}
+
+func TestEncodeRejectsVT(t *testing.T) {
+	payload := []byte{'A', VT, 'B'}
+	var b bytes.Buffer
+	if err := Encode(&b, payload); err == nil {
+		t.Fatal("Encode accepted payload containing VT")
 	}
 }
 

@@ -135,11 +135,15 @@ func (d *Decoder) feed(chunk []byte, onFrame func(payload []byte) error) error {
 }
 
 // Encode writes a single MLLP-framed message to w.
-// payload must not contain FS (0x1C) bytes; this is enforced.
+// payload must not contain VT (0x0B) or FS (0x1C) bytes; both are enforced.
+// VT would be misread as a new frame start by any compliant decoder.
 func Encode(w io.Writer, payload []byte) error {
 	for _, b := range payload {
 		if b == FS {
 			return errors.New("mllp: payload contains reserved FS byte (0x1C)")
+		}
+		if b == VT {
+			return errors.New("mllp: payload contains reserved VT byte (0x0B)")
 		}
 	}
 	frame := make([]byte, 0, 1+len(payload)+2)

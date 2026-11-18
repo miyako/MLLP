@@ -360,6 +360,7 @@ func runSend(args []string, stdout io.Writer, log *logging.Logger) error {
 	tlsCert := fs.String("tls-cert", "", "TLS client certificate")
 	tlsKey := fs.String("tls-key", "", "TLS client key")
 	tlsCA := fs.String("tls-ca", "", "CA bundle")
+	tlsServerName := fs.String("tls-server-name", "", "TLS server name for SNI")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -392,7 +393,12 @@ func runSend(args []string, stdout io.Writer, log *logging.Logger) error {
 
 	cfg := transport.ConnectConfig{
 		Host: *host, Port: *port,
-		TLS: transport.TLSConfig{CertFile: *tlsCert, KeyFile: *tlsKey, CAFile: *tlsCA},
+		TLS: transport.TLSConfig{
+			CertFile:   *tlsCert,
+			KeyFile:    *tlsKey,
+			CAFile:     *tlsCA,
+			ServerName: *tlsServerName,
+		},
 	}
 	connector, err := transport.NewConnector(cfg)
 	if err != nil {
@@ -523,6 +529,7 @@ func handleFrame(frame transport.Frame, pending map[string]*pendingMsg, sends ch
 		ConnectionID: frame.ConnectionID,
 		Direction:    "inbound",
 		Peer:         frame.Peer,
+		TLS:          frame.TLS,
 	})
 	if err != nil {
 		delete(pending, msgID)

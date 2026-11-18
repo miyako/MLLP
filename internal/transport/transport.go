@@ -150,6 +150,7 @@ type Frame struct {
 	ConnectionID string
 	Peer         string
 	Payload      []byte
+	TLS          bool // true when the connection uses TLS
 }
 
 // SendRequest asks the transport to send a payload on a specific connection.
