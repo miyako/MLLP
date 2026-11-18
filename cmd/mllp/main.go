@@ -69,6 +69,8 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) error {
 		return runListen(args[1:], stdin, stdout, stderr, log)
 	case "connect":
 		return runConnect(args[1:], stdin, stdout, stderr, log)
+	case "send":
+		return runSend(args[1:], stdout, log)
 	case "probe":
 		return runProbe(args[1:], stdout, log)
 	default:
@@ -77,7 +79,7 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) error {
 }
 
 func usageError() error {
-	return errors.New("usage: mllp <listen|connect|convert|probe|version>")
+	return errors.New("usage: mllp <listen|connect|send|convert|probe|version>")
 }
 
 func writeVersion(stdout io.Writer) error {
@@ -345,6 +347,121 @@ func runConnect(args []string, stdin io.Reader, stdout, stderr io.Writer, log *l
 				log.Error("remote ACK handling failed", map[string]any{"error": err.Error()})
 			}
 		}
+	}
+}
+
+// runSend is a one-shot outbound send: dial, send one message, wait for ACK, exit.
+func runSend(args []string, stdout io.Writer, log *logging.Logger) error {
+	fs := flag.NewFlagSet("send", flag.ContinueOnError)
+	host := fs.String("host", "", "remote host (required)")
+	port := fs.String("port", "2575", "remote port")
+	file := fs.String("file", "", "HL7 file to send (required)")
+	waitACK := fs.Bool("wait-ack", true, "wait for HL7 ACK before exiting")
+	tlsCert := fs.String("tls-cert", "", "TLS client certificate")
+	tlsKey := fs.String("tls-key", "", "TLS client key")
+	tlsCA := fs.String("tls-ca", "", "CA bundle")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if *host == "" {
+		return errors.New("send: --host is required")
+	}
+	if *file == "" {
+		return errors.New("send: --file is required")
+	}
+	if (*tlsCert == "") != (*tlsKey == "") {
+		return errors.New("send: --tls-cert and --tls-key must be supplied together")
+	}
+
+	raw, err := os.ReadFile(*file)
+	if err != nil {
+		return fmt.Errorf("send: %w", err)
+	}
+	normalized := strings.ReplaceAll(string(raw), "\r\n", "\r")
+	normalized = strings.ReplaceAll(normalized, "\n", "\r")
+	payload := []byte(normalized)
+
+	// Parse to extract MSH-10 for ACK correlation.
+	origMsg, err := er7.Parse(payload)
+	if err != nil {
+		return fmt.Errorf("send: HL7 parse: %w", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	cfg := transport.ConnectConfig{
+		Host: *host, Port: *port,
+		TLS: transport.TLSConfig{CertFile: *tlsCert, KeyFile: *tlsKey, CAFile: *tlsCA},
+	}
+	connector, err := transport.NewConnector(cfg)
+	if err != nil {
+		return err
+	}
+	if err := connector.Connect(ctx); err != nil {
+		return err
+	}
+
+	// Wait for connected event.
+	select {
+	case ev := <-connector.Events():
+		if ev.Event != "connected" {
+			return fmt.Errorf("send: unexpected event %q", ev.Event)
+		}
+		log.Info("connected", map[string]any{"peer": ev.Peer})
+	case <-ctx.Done():
+		return errors.New("send: connection timeout")
+	}
+
+	// Send the message.
+	result := make(chan error, 1)
+	connector.Sends() <- transport.SendRequest{Payload: payload, Result: result}
+	select {
+	case err := <-result:
+		if err != nil {
+			return fmt.Errorf("send: %w", err)
+		}
+	case <-ctx.Done():
+		return errors.New("send: send timeout")
+	}
+	log.Info("message sent", map[string]any{"controlId": origMsg.ControlID})
+
+	out := protocol.NewSafeWriter(stdout)
+	if !*waitACK {
+		return out.Write(map[string]any{
+			"protocol": 1, "kind": "sent", "controlId": origMsg.ControlID,
+		})
+	}
+
+	// Wait for the remote ACK frame.
+	select {
+	case frame := <-connector.Frames():
+		ackMsg, err := er7.Parse(frame.Payload)
+		if err != nil {
+			return fmt.Errorf("send: ACK parse: %w", err)
+		}
+		if err := ack.Validate(origMsg.ControlID, ackMsg); err != nil {
+			return fmt.Errorf("send: ACK correlation: %w", err)
+		}
+		code, err := ack.CodeFromMSA1(ackMsg)
+		if err != nil {
+			return fmt.Errorf("send: ACK code: %w", err)
+		}
+		log.Info("ACK received", map[string]any{"controlId": origMsg.ControlID, "code": string(code)})
+		if err := out.Write(map[string]any{
+			"protocol": 1, "kind": "ack",
+			"ackCode": string(code), "controlId": origMsg.ControlID,
+		}); err != nil {
+			return err
+		}
+		if code == ack.AE || code == ack.AR {
+			os.Exit(3)
+		}
+		return nil
+	case ev := <-connector.Events():
+		return fmt.Errorf("send: connection event before ACK: %v %v", ev.Event, ev.Err)
+	case <-ctx.Done():
+		return errors.New("send: ACK timeout")
 	}
 }
 
