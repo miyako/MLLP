@@ -1,0 +1,4 @@
+MSH|^~\&|A|B|C|D|20260101||ADT^A01|ID1|P|2.5.1
+PID|1||12345||Doe^John
+ZPD|partner-data|custom-field-1|custom-field-2
+ZIN|insurance-info|group-id-12345

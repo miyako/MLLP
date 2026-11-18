@@ -1,0 +1,2 @@
+MSH|^~\&|A|B|C|D|20260101||ADT^A01|ID1|P|2.5.1
+NTE|1||Comment with \F\ pipe escape and \S\ component escape

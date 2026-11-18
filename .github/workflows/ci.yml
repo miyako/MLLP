@@ -1,0 +1,72 @@
+name: CI
+
+on:
+  push:
+    branches: ['**']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-15, windows-2025]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.25.x'
+          cache: false
+
+      - name: Verify module and formatting
+        run: |
+          go mod verify
+          gofmt -l . | tee /tmp/fmt.txt
+          test ! -s /tmp/fmt.txt
+        shell: bash
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Unit and golden tests
+        run: go test -race -count=1 ./...
+
+  build:
+    needs: test
+    runs-on: ubuntu-24.04
+    strategy:
+      matrix:
+        include:
+          - goos: darwin
+            goarch: arm64
+            artifact: mllp-darwin-arm64
+          - goos: darwin
+            goarch: amd64
+            artifact: mllp-darwin-amd64
+          - goos: windows
+            goarch: amd64
+            artifact: mllp-windows-amd64.exe
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.25.x'
+          cache: false
+      - name: Build
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: '0'
+        run: go build -trimpath -ldflags="-s -w" -o build/${{ matrix.artifact }} ./cmd/mllp
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: build/${{ matrix.artifact }}
+          if-no-files-found: error
+          retention-days: 7
