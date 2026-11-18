@@ -116,3 +116,25 @@ func TestConvertNoHTMLEscape(t *testing.T) {
 		t.Error("HTML escape found in convert output")
 	}
 }
+
+func TestConfigFileLoaded(t *testing.T) {
+	// Write a minimal config file and confirm it loads without error.
+	f, err := os.CreateTemp("", "mllp-cfg-*.toml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.Remove(f.Name())
+	f.WriteString("[listener]\nbind = \"127.0.0.1:2575\"\n")
+	f.Close()
+
+	if err := run([]string{"--config", f.Name(), "version"}, nil, io.Discard, io.Discard); err != nil {
+		t.Fatalf("--config flag: %v", err)
+	}
+}
+
+func TestConfigFileMissing(t *testing.T) {
+	err := run([]string{"--config", "/nonexistent/path.toml", "version"}, nil, io.Discard, io.Discard)
+	if err == nil {
+		t.Fatal("expected error for missing config file")
+	}
+}

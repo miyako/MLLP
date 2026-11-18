@@ -31,6 +31,7 @@ import (
 
 	"github.com/miyako/mllp/internal/ack"
 	"github.com/miyako/mllp/internal/codec/canonical"
+	"github.com/miyako/mllp/internal/config"
 	"github.com/miyako/mllp/internal/hl7/er7"
 	"github.com/miyako/mllp/internal/host/protocol"
 	"github.com/miyako/mllp/internal/logging"
@@ -60,19 +61,38 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) error {
 		return usageError()
 	}
 
-	switch args[0] {
+	// Parse a leading --config flag before the subcommand.
+	// All other flags are handled per-subcommand.
+	configPath := ""
+	remaining := args
+	if len(args) >= 2 && args[0] == "--config" {
+		configPath = args[1]
+		remaining = args[2:]
+	}
+
+	cfg, err := config.Load(configPath)
+	if err != nil {
+		return err
+	}
+	cfg.ApplyDefaults()
+
+	if len(remaining) == 0 {
+		return usageError()
+	}
+
+	switch remaining[0] {
 	case "version", "--version":
 		return writeVersion(stdout)
 	case "convert":
-		return runConvert(args[1:], stdin, stdout)
+		return runConvert(remaining[1:], stdin, stdout)
 	case "listen":
-		return runListen(args[1:], stdin, stdout, stderr, log)
+		return runListen(remaining[1:], stdin, stdout, stderr, log, cfg)
 	case "connect":
-		return runConnect(args[1:], stdin, stdout, stderr, log)
+		return runConnect(remaining[1:], stdin, stdout, stderr, log, cfg)
 	case "send":
-		return runSend(args[1:], stdout, log)
+		return runSend(remaining[1:], stdout, log)
 	case "probe":
-		return runProbe(args[1:], stdout, log)
+		return runProbe(remaining[1:], stdout, log)
 	default:
 		return usageError()
 	}
@@ -143,14 +163,14 @@ func runConvert(args []string, stdin io.Reader, stdout io.Writer) error {
 
 // runListen starts an inbound MLLP listener, connects it to the host protocol,
 // and runs the full deferred-ACK loop.
-func runListen(args []string, stdin io.Reader, stdout, stderr io.Writer, log *logging.Logger) error {
+func runListen(args []string, stdin io.Reader, stdout, stderr io.Writer, log *logging.Logger, cfg *config.Config) error {
 	fs := flag.NewFlagSet("listen", flag.ContinueOnError)
 	fs.SetOutput(stderr)
-	bind := fs.String("bind", "127.0.0.1:2575", "IP:port to listen on")
-	tlsCert := fs.String("tls-cert", "", "TLS certificate file")
-	tlsKey := fs.String("tls-key", "", "TLS key file")
-	tlsCA := fs.String("tls-ca", "", "CA bundle for mTLS")
-	maxConn := fs.Int("max-connections", transport.DefaultMaxConnections, "maximum concurrent inbound connections")
+	bind := fs.String("bind", cfg.Listener.Bind, "IP:port to listen on")
+	tlsCert := fs.String("tls-cert", cfg.TLS.CertFile, "TLS certificate file")
+	tlsKey := fs.String("tls-key", cfg.TLS.KeyFile, "TLS key file")
+	tlsCA := fs.String("tls-ca", cfg.TLS.CAFile, "CA bundle for mTLS")
+	maxConn := fs.Int("max-connections", cfg.Listener.MaxConnections, "maximum concurrent inbound connections")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -172,7 +192,7 @@ func runListen(args []string, stdin io.Reader, stdout, stderr io.Writer, log *lo
 		return errors.New("listen: --tls-cert and --tls-key must be supplied together")
 	}
 
-	cfg := transport.ListenConfig{
+	lcfg := transport.ListenConfig{
 		Bind:           *bind,
 		MaxConnections: *maxConn,
 		TLS: transport.TLSConfig{
@@ -183,7 +203,7 @@ func runListen(args []string, stdin io.Reader, stdout, stderr io.Writer, log *lo
 		},
 	}
 
-	l, err := transport.NewListener(cfg)
+	l, err := transport.NewListener(lcfg)
 	if err != nil {
 		return err
 	}
@@ -253,16 +273,16 @@ func runListen(args []string, stdin io.Reader, stdout, stderr io.Writer, log *lo
 }
 
 // runConnect starts a persistent outbound MLLP connection and runs the host protocol loop.
-func runConnect(args []string, stdin io.Reader, stdout, stderr io.Writer, log *logging.Logger) error {
+func runConnect(args []string, stdin io.Reader, stdout, stderr io.Writer, log *logging.Logger, cfg *config.Config) error {
 	fs := flag.NewFlagSet("connect", flag.ContinueOnError)
 	fs.SetOutput(stderr)
-	host := fs.String("host", "", "remote host (required)")
-	port := fs.String("port", "2575", "remote port")
-	tlsCert := fs.String("tls-cert", "", "TLS client certificate file")
-	tlsKey := fs.String("tls-key", "", "TLS client key file")
-	tlsCA := fs.String("tls-ca", "", "CA bundle for server certificate verification")
+	host := fs.String("host", cfg.Connector.Host, "remote host (required)")
+	port := fs.String("port", cfg.Connector.Port, "remote port")
+	tlsCert := fs.String("tls-cert", cfg.TLS.CertFile, "TLS client certificate file")
+	tlsKey := fs.String("tls-key", cfg.TLS.KeyFile, "TLS client key file")
+	tlsCA := fs.String("tls-ca", cfg.TLS.CAFile, "CA bundle for server certificate verification")
 	tlsServerName := fs.String("tls-server-name", "", "TLS server name for SNI")
-	useTLS := fs.Bool("tls", false, "enable TLS (required when tls-cert or tls-ca is set)")
+	useTLS := fs.Bool("tls", cfg.TLS.Enabled, "enable TLS")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -274,7 +294,7 @@ func runConnect(args []string, stdin io.Reader, stdout, stderr io.Writer, log *l
 	}
 	_ = useTLS // presence of cert/ca flags implies TLS
 
-	cfg := transport.ConnectConfig{
+	ccfg := transport.ConnectConfig{
 		Host: *host,
 		Port: *port,
 		TLS: transport.TLSConfig{
@@ -285,7 +305,7 @@ func runConnect(args []string, stdin io.Reader, stdout, stderr io.Writer, log *l
 		},
 	}
 
-	connector, err := transport.NewConnector(cfg)
+	connector, err := transport.NewConnector(ccfg)
 	if err != nil {
 		return err
 	}

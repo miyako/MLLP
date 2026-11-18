@@ -1,0 +1,69 @@
+# mllp.example.toml — reference configuration for the mllp CLI
+# Copy to mllp.toml and edit for your deployment.
+# CLI flags always override values set here.
+
+# ─── Listener (mllp listen) ───────────────────────────────────────────────────
+
+[listener]
+# Concrete IP:port to bind. Wildcard binds (0.0.0.0) are forbidden.
+# Default: "127.0.0.1:2575"
+bind = "127.0.0.1:2575"
+
+# Maximum concurrent inbound connections.
+# Default: 100
+max_connections = 100
+
+# Maximum MLLP frame payload size in bytes.
+# Clinical messages may contain OBX segments with embedded documents.
+# Default: 1048576 (1 MiB)
+max_frame_bytes = 1048576
+
+# ─── Connector (mllp connect / mllp send) ─────────────────────────────────────
+
+[connector]
+# Remote host and port for outbound connections.
+host = ""
+port = "2575"
+
+# ─── TLS ──────────────────────────────────────────────────────────────────────
+
+[tls]
+# Enable TLS. Required for any non-loopback listener.
+# Plain TCP must never be silently enabled for LAN deployments.
+enabled = false
+
+# PEM certificate and private key (server or client, depending on mode).
+cert = ""
+key  = ""
+
+# PEM CA bundle. When set on a listener, enables mTLS (client cert required).
+ca = ""
+
+# Require and verify peer certificate.
+verify_peer = false
+
+# Minimum TLS version. "1.2" is the minimum acceptable for production.
+min_version = "1.2"
+
+# ─── ACK engine ───────────────────────────────────────────────────────────────
+
+[ack]
+# ACK mode.
+#   "manual"  — host decides after durable persistence (default, recommended)
+#   "auto-aa" — CLI immediately accepts (only for trusted internal pipelines)
+mode = "manual"
+
+# Milliseconds to wait for the host to return an ACK decision before treating
+# the outcome as unknown. Timeout is not a rejection; the sender may retry.
+# Default: 30000
+timeout_ms = 30000
+
+# ─── Host protocol ────────────────────────────────────────────────────────────
+
+[host]
+# NDJSON protocol version. Must be 1.
+protocol = 1
+
+# Maximum number of inbound messages waiting for host ACK before backpressure.
+# Default: 100
+max_pending_messages = 100
